@@ -1,85 +1,76 @@
 #!/usr/bin/env python3
-"""Starter template for the port knocking server."""
+"""
+Port knocking using iptables 'recent' (Option C).
+
+This script installs firewall rules on the HOST (EC2) to:
+- Block secret_ssh (172.20.0.20:2222) by default for container-to-container traffic
+- Require a knock sequence against the port_knocking container (172.20.0.40):
+  1234 -> 5678 -> 9012 within 10 seconds each
+- After correct sequence, allow the source IP to reach 172.20.0.20:2222 for 30 seconds
+
+Run on the host (not inside a container):
+  sudo python3 port_knocking/knock_server.py --install
+"""
 
 import argparse
-import logging
-import socket
-import time
+import subprocess
 
-DEFAULT_KNOCK_SEQUENCE = [1234, 5678, 9012]
-DEFAULT_PROTECTED_PORT = 2222
-DEFAULT_SEQUENCE_WINDOW = 10.0
+DEFAULT_PROTECTED_IP = "172.20.0.20"
+DEFAULT_KNOCK_IP = "172.20.0.40"
+DEFAULT_TTL = 30
+DEFAULT_WINDOW = 10
 
+def run(cmd):
+    return subprocess.run(cmd, check=True)
 
-def setup_logging():
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s - %(levelname)s - %(message)s",
-        handlers=[logging.StreamHandler()],
-    )
+def install_rules(protected_ip, knock_ip, window, ttl):
+    # Ensure DOCKER-USER exists
+    subprocess.run(["sudo", "iptables", "-N", "DOCKER-USER"], stderr=subprocess.DEVNULL)
 
+    # Flush to avoid duplicates
+    run(["sudo", "iptables", "-F", "DOCKER-USER"])
 
-def open_protected_port(protected_port):
-    """Open the protected port using firewall rules."""
-    # TODO: Use iptables/nftables to allow access to protected_port.
-    logging.info("TODO: Open firewall for port %s", protected_port)
+    # Default drop protected port
+    run(["sudo", "iptables", "-A", "DOCKER-USER", "-d", f"{protected_ip}/32", "-p", "tcp", "--dport", "2222", "-j", "DROP"])
 
+    # Knock1
+    run(["sudo", "iptables", "-I", "DOCKER-USER", "1", "-d", f"{knock_ip}/32", "-p", "tcp", "--dport", "1234",
+         "-m", "recent", "--set", "--name", "KNOCK1", "--rsource", "-j", "DROP"])
 
-def close_protected_port(protected_port):
-    """Close the protected port using firewall rules."""
-    # TODO: Remove firewall rules for protected_port.
-    logging.info("TODO: Close firewall for port %s", protected_port)
+    # Knock2
+    run(["sudo", "iptables", "-I", "DOCKER-USER", "1", "-d", f"{knock_ip}/32", "-p", "tcp", "--dport", "5678",
+         "-m", "recent", "--rcheck", "--seconds", str(window), "--name", "KNOCK1", "--rsource",
+         "-m", "recent", "--set", "--name", "KNOCK2", "--rsource", "-j", "DROP"])
 
+    # Knock3
+    run(["sudo", "iptables", "-I", "DOCKER-USER", "1", "-d", f"{knock_ip}/32", "-p", "tcp", "--dport", "9012",
+         "-m", "recent", "--rcheck", "--seconds", str(window), "--name", "KNOCK2", "--rsource",
+         "-m", "recent", "--set", "--name", "KNOCK3", "--rsource", "-j", "DROP"])
 
-def listen_for_knocks(sequence, window_seconds, protected_port):
-    """Listen for knock sequence and open the protected port."""
-    logger = logging.getLogger("KnockServer")
-    logger.info("Listening for knocks: %s", sequence)
-    logger.info("Protected port: %s", protected_port)
+    # Allow after final knock
+    run(["sudo", "iptables", "-I", "DOCKER-USER", "1", "-d", f"{protected_ip}/32", "-p", "tcp", "--dport", "2222",
+         "-m", "recent", "--rcheck", "--seconds", str(ttl), "--name", "KNOCK3", "--rsource", "-j", "ACCEPT"])
 
-    # TODO: Create UDP or TCP listeners for each knock port.
-    # TODO: Track each source IP and its progress through the sequence.
-    # TODO: Enforce timing window per sequence.
-    # TODO: On correct sequence, call open_protected_port().
-    # TODO: On incorrect sequence, reset progress.
-
-    while True:
-        time.sleep(1)
-
-
-def parse_args():
-    parser = argparse.ArgumentParser(description="Port knocking server starter")
-    parser.add_argument(
-        "--sequence",
-        default=",".join(str(port) for port in DEFAULT_KNOCK_SEQUENCE),
-        help="Comma-separated knock ports",
-    )
-    parser.add_argument(
-        "--protected-port",
-        type=int,
-        default=DEFAULT_PROTECTED_PORT,
-        help="Protected service port",
-    )
-    parser.add_argument(
-        "--window",
-        type=float,
-        default=DEFAULT_SEQUENCE_WINDOW,
-        help="Seconds allowed to complete the sequence",
-    )
-    return parser.parse_args()
-
+def show_rules():
+    subprocess.run(["sudo", "iptables", "-S", "DOCKER-USER"], check=True)
 
 def main():
-    args = parse_args()
-    setup_logging()
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--protected-ip", default=DEFAULT_PROTECTED_IP)
+    ap.add_argument("--knock-ip", default=DEFAULT_KNOCK_IP)
+    ap.add_argument("--window", type=int, default=DEFAULT_WINDOW)
+    ap.add_argument("--ttl", type=int, default=DEFAULT_TTL)
+    ap.add_argument("--install", action="store_true")
+    ap.add_argument("--show", action="store_true")
+    args = ap.parse_args()
 
-    try:
-        sequence = [int(port) for port in args.sequence.split(",")]
-    except ValueError:
-        raise SystemExit("Invalid sequence. Use comma-separated integers.")
-
-    listen_for_knocks(sequence, args.window, args.protected_port)
-
+    if args.install:
+        install_rules(args.protected_ip, args.knock_ip, args.window, args.ttl)
+        show_rules()
+    elif args.show:
+        show_rules()
+    else:
+        ap.print_help()
 
 if __name__ == "__main__":
     main()
