@@ -1,0 +1,6 @@
+honeypot/logs/*
+honeypot/logs/.gitkeep
+__pycache__/
+*.pyc
+logs/
+*.pcap
